@@ -1,0 +1,67 @@
+@jump_table = private local_unnamed_addr global [5 x ptr] [ptr @lza, ptr @lzo, ptr @lu, ptr @li, ptr @lc], align 8
+
+{% macro define(name) -%}
+define internal ghccc void @{{ name }}(ptr nonnull readonly align 1 %ip, ptr nonnull align 8 %fp, ptr nonnull align 8 %sp, i64 %acc) local_unnamed_addr
+{% endmacro -%}
+
+{% macro bytecode(name, offset) -%}
+    %{{ name }}.ptr = getelementptr inbounds i8, ptr %ip, i32 {{ offset }}
+    %{{ name }} = load i8, ptr %{{ name }}.ptr, align 1
+{% endmacro -%}
+
+{% macro opcode(name, offset) -%}
+    {{ bytecode(name + ".i8", offset) }}
+    %opcode = zext i8 %opcode.i8 to i32
+{% endmacro -%}
+
+{% macro thread(op, ip, fp, sp, acc) -%}
+    {# Look up the handler table for the given opcode -#}
+    %handler.ptr = getelementptr inbounds ptr, ptr @jump_table, i32 {{ op }}
+    %handler = load ptr, ptr %handler.ptr, align 8
+    {# Tail call the handler with the updated state - indirect threading -#}
+    musttail call ghccc void %handler(ptr {{ ip }}, ptr {{ fp }}, ptr {{ sp }}, i64 {{ acc }})
+    ret void
+{% endmacro -%}
+
+{% macro dispatch(offset, fp, sp, acc) -%}
+    {# Load the opcode at the current instruction pointer -#}
+    {{ opcode("opcode", offset) }}
+    {# Calculate the new instruction pointer and call the handler -#}
+    %ip.next = getelementptr inbounds i8, ptr %ip, i32 {{ offset }}
+    {{ thread("%opcode", "%ip.next", fp, sp, acc) }}
+{% endmacro -%}
+
+{{ define("lza") }} {
+entry:
+    {{ dispatch(1, "%fp", "%sp", "0") }}
+}
+
+{{ define("lzo") }} {
+entry:
+    {{ dispatch(1, "%fp", "%sp", "1") }}
+}
+
+{{ define("lu") }} {
+entry:
+    {{ bytecode("imm.i8", 1) }}
+    %imm = zext i8 %imm.i8 to i64
+    {{ dispatch(2, "%fp", "%sp", "%imm") }}
+}
+
+{{ define("li") }} {
+entry:
+    {{ bytecode("imm.i8", 1) }}
+    %imm = sext i8 %imm.i8 to i64
+    {{ dispatch(2, "%fp", "%sp", "%imm") }}
+}
+
+{{ define("lc") }} {
+entry:
+    {{ bytecode("idx.i8", 1) }}
+    %idx = zext i8 %idx.i8 to i32
+    %pool.ptr.ptr = getelementptr inbounds i64, ptr %fp, i32 1
+    %pool.ptr = load ptr, ptr %pool.ptr.ptr, align 8
+    %imm.ptr = getelementptr inbounds i64, ptr %pool.ptr, i32 %idx
+    %imm = load i64, ptr %imm.ptr, align 8
+    {{ dispatch(2, "%fp", "%sp", "%imm") }}
+}
