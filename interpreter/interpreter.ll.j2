@@ -1,67 +1,310 @@
-@jump_table = private local_unnamed_addr global [5 x ptr] [ptr @lza, ptr @lzo, ptr @lu, ptr @li, ptr @lc], align 8
+{% set handlers = namespace(list=[]) -%}
 
 {% macro define(name) -%}
+{% set handlers.list = handlers.list + [name] -%}
 define internal ghccc void @{{ name }}(ptr nonnull readonly align 1 %ip, ptr nonnull align 8 %fp, ptr nonnull align 8 %sp, i64 %acc) local_unnamed_addr
-{% endmacro -%}
+{%- endmacro -%}
 
 {% macro bytecode(name, offset) -%}
     %{{ name }}.ptr = getelementptr inbounds i8, ptr %ip, i32 {{ offset }}
     %{{ name }} = load i8, ptr %{{ name }}.ptr, align 1
-{% endmacro -%}
+{%- endmacro -%}
 
 {% macro opcode(name, offset) -%}
     {{ bytecode(name + ".i8", offset) }}
-    %opcode = zext i8 %opcode.i8 to i32
+    %{{ name }} = zext i8 %{{ name }}.i8 to i32
 {% endmacro -%}
 
-{% macro thread(op, ip, fp, sp, acc) -%}
+{% macro operand(name, offset) -%}
+    {{ bytecode(name + ".offset.i8", offset) }}
+    %{{ name }}.offset = sext i8 %{{ name }}.offset.i8 to i32
+    %{{ name }}.ptr = getelementptr inbounds i64, ptr %fp, i32 %{{ name }}.offset
+{%- endmacro %}
+
+{% macro thread(code, ip, fp, sp, acc, salt="") -%}
     {# Look up the handler table for the given opcode -#}
-    %handler.ptr = getelementptr inbounds ptr, ptr @jump_table, i32 {{ op }}
-    %handler = load ptr, ptr %handler.ptr, align 8
+    %handler.ptr{{ salt }} = getelementptr inbounds ptr, ptr @jump_table, i32 {{ code }}
+    %handler{{ salt }} = load ptr, ptr %handler.ptr{{ salt }}, align 8
     {# Tail call the handler with the updated state - indirect threading -#}
-    musttail call ghccc void %handler(ptr {{ ip }}, ptr {{ fp }}, ptr {{ sp }}, i64 {{ acc }})
+    musttail call ghccc void %handler{{ salt }}(ptr {{ ip }}, ptr {{ fp }}, ptr {{ sp }}, i64 {{ acc }})
     ret void
 {% endmacro -%}
 
-{% macro dispatch(offset, fp, sp, acc) -%}
+{% macro dispatch(offset, fp, sp, acc, salt="") -%}
     {# Load the opcode at the current instruction pointer -#}
-    {{ opcode("opcode", offset) }}
+    {{ opcode("opcode" + salt, offset) }}
     {# Calculate the new instruction pointer and call the handler -#}
-    %ip.next = getelementptr inbounds i8, ptr %ip, i32 {{ offset }}
-    {{ thread("%opcode", "%ip.next", fp, sp, acc) }}
+    %ip.next{{ salt }} = getelementptr inbounds i8, ptr %ip, i32 {{ offset }}
+    {{ thread("%opcode" + salt, "%ip.next" + salt, fp, sp, acc, salt) -}}
 {% endmacro -%}
 
 {{ define("lza") }} {
 entry:
-    {{ dispatch(1, "%fp", "%sp", "0") }}
+    {{ dispatch(1, "%fp", "%sp", "0") -}}
 }
 
-{{ define("lzo") }} {
+{{ define("loa") }} {
 entry:
-    {{ dispatch(1, "%fp", "%sp", "1") }}
+    {{ dispatch(1, "%fp", "%sp", "1") -}}
 }
 
 {{ define("lu") }} {
 entry:
     {{ bytecode("imm.i8", 1) }}
     %imm = zext i8 %imm.i8 to i64
-    {{ dispatch(2, "%fp", "%sp", "%imm") }}
+    {{ dispatch(2, "%fp", "%sp", "%imm") -}}
 }
 
 {{ define("li") }} {
 entry:
     {{ bytecode("imm.i8", 1) }}
     %imm = sext i8 %imm.i8 to i64
-    {{ dispatch(2, "%fp", "%sp", "%imm") }}
+    {{ dispatch(2, "%fp", "%sp", "%imm") -}}
 }
 
-{{ define("lc") }} {
+{{ define("ldar") }} {
 entry:
-    {{ bytecode("idx.i8", 1) }}
-    %idx = zext i8 %idx.i8 to i32
-    %pool.ptr.ptr = getelementptr inbounds i64, ptr %fp, i32 1
-    %pool.ptr = load ptr, ptr %pool.ptr.ptr, align 8
-    %imm.ptr = getelementptr inbounds i64, ptr %pool.ptr, i32 %idx
-    %imm = load i64, ptr %imm.ptr, align 8
-    {{ dispatch(2, "%fp", "%sp", "%imm") }}
+    {{ operand("value", 1) }}
+    %value = load i64, ptr %value.ptr, align 8
+
+    {{ dispatch(2, "%fp", "%sp", "%value") -}}
 }
+
+{{ define("star") }} {
+entry:
+    {{ operand("value", 1) }}
+    store i64 %acc, ptr %value.ptr, align 8
+
+    {{ dispatch(2, "%fp", "%sp", "%acc") -}}
+}
+
+{{ define("ineg") }} {
+entry:
+    %acc.neg = sub i64 0, %acc
+    {{ dispatch(1, "%fp", "%sp", "%acc.neg") -}}
+}
+
+{{ define("binv") }} {
+entry:
+    %acc.inv = xor i64 -1, %acc
+    {{ dispatch(1, "%fp", "%sp", "%acc.inv") -}}
+}
+
+{{ define("lnot") }} {
+entry:
+    %acc.not = xor i64 1, %acc
+    {{ dispatch(1, "%fp", "%sp", "%acc.not") -}}
+}
+
+{{ define("iadd") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.add = add i64 %acc, %rhs
+    {{ dispatch(2, "%fp", "%sp", "%acc.add") -}}
+}
+
+{{ define("isub") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.sub = sub i64 %acc, %rhs
+    {{ dispatch(2, "%fp", "%sp", "%acc.sub") -}}
+}
+
+{{ define("imul") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.mul = mul i64 %acc, %rhs
+    {{ dispatch(2, "%fp", "%sp", "%acc.mul") -}}
+}
+
+{{ define("udiv") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.div = udiv i64 %acc, %rhs
+    {{ dispatch(2, "%fp", "%sp", "%acc.div") -}}
+}
+
+{{ define("idiv") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.div = sdiv i64 %acc, %rhs
+    {{ dispatch(2, "%fp", "%sp", "%acc.div") -}}
+}
+
+{{ define("umod") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.mod = urem i64 %acc, %rhs
+    {{ dispatch(2, "%fp", "%sp", "%acc.mod") -}}
+}
+
+{{ define("imod") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.mod = srem i64 %acc, %rhs
+    {{ dispatch(2, "%fp", "%sp", "%acc.mod") -}}
+}
+
+{{ define("band") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.and = and i64 %acc, %rhs
+    {{ dispatch(2, "%fp", "%sp", "%acc.and") -}}
+}
+
+{{ define("bor") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.or = or i64 %acc, %rhs
+    {{ dispatch(2, "%fp", "%sp", "%acc.or") -}}
+}
+
+{{ define("bxor") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.xor = xor i64 %acc, %rhs
+    {{ dispatch(2, "%fp", "%sp", "%acc.xor") -}}
+}
+
+{{ define("sll") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.sll = shl i64 %acc, %rhs
+    {{ dispatch(2, "%fp", "%sp", "%acc.sll") -}}
+}
+
+{{ define("srl") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.srl = lshr i64 %acc, %rhs
+    {{ dispatch(2, "%fp", "%sp", "%acc.srl") -}}
+}
+
+{{ define("sra") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.sra = ashr i64 %acc, %rhs
+    {{ dispatch(2, "%fp", "%sp", "%acc.sra") -}}
+}
+
+{{ define("ieq") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.eq.i1 = icmp eq i64 %acc, %rhs
+    %acc.eq = zext i1 %acc.eq.i1 to i64
+    {{ dispatch(2, "%fp", "%sp", "%acc.eq") -}}
+}
+
+{{ define("ine") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.ne.i1 = icmp ne i64 %acc, %rhs
+    %acc.ne = zext i1 %acc.ne.i1 to i64
+    {{ dispatch(2, "%fp", "%sp", "%acc.ne") -}}
+}
+
+{{ define("ult") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.lt.i1 = icmp ult i64 %acc, %rhs
+    %acc.lt = zext i1 %acc.lt.i1 to i64
+    {{ dispatch(2, "%fp", "%sp", "%acc.lt") -}}
+}
+
+{{ define("ugt") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.gt.i1 = icmp ugt i64 %acc, %rhs
+    %acc.gt = zext i1 %acc.gt.i1 to i64
+    {{ dispatch(2, "%fp", "%sp", "%acc.gt") -}}
+}
+
+{{ define("ilt") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.lt.i1 = icmp slt i64 %acc, %rhs
+    %acc.lt = zext i1 %acc.lt.i1 to i64
+    {{ dispatch(2, "%fp", "%sp", "%acc.lt") -}}
+}
+
+{{ define("igt") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.gt.i1 = icmp sgt i64 %acc, %rhs
+    %acc.gt = zext i1 %acc.gt.i1 to i64
+    {{ dispatch(2, "%fp", "%sp", "%acc.gt") -}}
+}
+
+{{ define("ule") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.le.i1 = icmp ule i64 %acc, %rhs
+    %acc.le = zext i1 %acc.le.i1 to i64
+    {{ dispatch(2, "%fp", "%sp", "%acc.le") -}}
+}
+
+{{ define("uge") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.ge.i1 = icmp uge i64 %acc, %rhs
+    %acc.ge = zext i1 %acc.ge.i1 to i64
+    {{ dispatch(2, "%fp", "%sp", "%acc.ge") -}}
+}
+
+{{ define("ile") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.le.i1 = icmp sle i64 %acc, %rhs
+    %acc.le = zext i1 %acc.le.i1 to i64
+    {{ dispatch(2, "%fp", "%sp", "%acc.le") -}}
+}
+
+{{ define("ige") }} {
+entry:
+    {{ operand("rhs", 1) }}
+    %rhs = load i64, ptr %rhs.ptr, align 8
+    %acc.ge.i1 = icmp sge i64 %acc, %rhs
+    %acc.ge = zext i1 %acc.ge.i1 to i64
+    {{ dispatch(2, "%fp", "%sp", "%acc.ge") -}}
+}
+
+{{ define("br") }} {
+entry:
+    {{ operand("offset", 1) }}
+    %offset.i64 = load i64, ptr %offset.ptr, align 8
+    %offset = trunc i64 %offset.i64 to i32
+    %cond = trunc i64 %acc to i1
+    br i1 %cond, label %btrue, label %bfalse
+btrue:
+    {{ dispatch("%offset", "%fp", "%sp", "%acc", ".true") -}}
+bfalse:
+    {{ dispatch(2, "%fp", "%sp", "%acc", ".false") -}}
+}
+
+@jump_table = internal local_unnamed_addr global [{{ handlers.list | length }} x ptr] [
+{%- for handler in handlers.list %}
+    ptr @{{ handler }}{{ "," if not loop.last else "" }}
+{%- endfor %}
+], align 8
